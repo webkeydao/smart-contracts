@@ -421,11 +421,12 @@ contract Treasury is Ownable {
     function supply(
         address receiver,
         uint amount
-    ) public returns (uint) {
+    ) internal returns (uint) {
         // IERC20(OHM).transfer(receiver, amount);
         // supplied = supplied.add(amount);
         IERC20Mintable(OHM).mint(receiver, amount);
     }
+    
     function supplied() public view returns (uint) {
         return IERC20(OHM).totalSupply();
     }
