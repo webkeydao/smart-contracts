@@ -5,7 +5,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 pragma solidity 0.7.5;
 
-
 library SafeMath {
     function add(uint256 a, uint256 b) internal pure returns (uint256) {
         uint256 c = a + b;
@@ -281,13 +280,11 @@ library SafeERC20 {
     }
 }
 
-
 interface IERC20Mintable {
-  function mint(uint256 amount_) external;
+    function mint(uint256 amount_) external;
 
-  function mint(address account_, uint256 ammount_) external;
+    function mint(address account_, uint256 ammount_) external;
 }
-
 
 interface IOHMERC20 {
     function burnFrom(address account_, uint256 amount_) external;
@@ -394,6 +391,9 @@ contract Treasury is Ownable {
 
     uint public totalReserves; // Risk-free value of all assets
     uint public totalDebt;
+    mapping(address => uint) public debtorCollateral; // Tracks locked sOHM collateral
+    event CollateralUnlocked(address indexed debtor, uint amount);
+
     // uint public supplied;
 
     constructor(
@@ -417,16 +417,12 @@ contract Treasury is Ownable {
         curve = _curve;
     }
 
-
-    function supply(
-        address receiver,
-        uint amount
-    ) internal returns (uint) {
+    function supply(address receiver, uint amount) internal {
         // IERC20(OHM).transfer(receiver, amount);
         // supplied = supplied.add(amount);
         IERC20Mintable(OHM).mint(receiver, amount);
     }
-    
+
     function supplied() public view returns (uint) {
         return IERC20(OHM).totalSupply();
     }
@@ -443,15 +439,13 @@ contract Treasury is Ownable {
         address _token,
         uint _profit
     ) external returns (uint send_) {
-
         require(
             isReserveToken[_token] || isLiquidityToken[_token],
             "Not accepted"
         );
         uint256 balance = IERC20(_token).balanceOf(msg.sender);
-        
-        require(balance >= _amount, "Insufficient balance");
 
+        require(balance >= _amount, "Insufficient balance");
 
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
 
@@ -464,15 +458,13 @@ contract Treasury is Ownable {
         uint value = valueOf(_token, _amount);
         // transfer OHM needed and store amount of rewards for distribution
         send_ = value.sub(_profit);
-        
+
         supply(msg.sender, send_);
 
-        
         totalReserves = totalReserves.add(value);
         emit ReservesUpdated(totalReserves);
 
         emit Deposit(_token, _amount, value);
-        
     }
 
     /**
@@ -506,19 +498,76 @@ contract Treasury is Ownable {
 
         uint value = valueOf(_token, _amount);
 
-        uint maximumDebt = IERC20(sOHM).balanceOf(msg.sender); // Can only borrow against sOHM held
-        uint availableDebt = maximumDebt.sub(debtorBalance[msg.sender]);
+        // Get sOHM balance and locked collateral
+        uint userBalance = IERC20(sOHM).balanceOf(msg.sender);
+        uint lockedCollateral = debtorCollateral[msg.sender];
+
+        // Check available debt limit
+        uint availableDebt = userBalance.add(lockedCollateral).sub(
+            debtorBalance[msg.sender]
+        );
         require(value <= availableDebt, "Exceeds debt limit");
 
+        // Lock additional collateral if needed
+        // Lock additional collateral if needed
+        if (lockedCollateral < value) {
+            uint additionalCollateral = value.sub(lockedCollateral);
+            IERC20(sOHM).transferFrom(
+                msg.sender,
+                address(this),
+                additionalCollateral
+            );
+            debtorCollateral[msg.sender] = debtorCollateral[msg.sender].add(
+                additionalCollateral
+            );
+        }
+
+        // Update debt balances and reserves
         debtorBalance[msg.sender] = debtorBalance[msg.sender].add(value);
         totalDebt = totalDebt.add(value);
-
         totalReserves = totalReserves.sub(value);
+
         emit ReservesUpdated(totalReserves);
 
+        // Transfer the borrowed tokens to the user
         IERC20(_token).transfer(msg.sender, _amount);
 
         emit CreateDebt(msg.sender, _token, _amount, value);
+    }
+
+    function repayDebt(uint _amount, address _token) external {
+        require(isDebtor[msg.sender], "Not approved");
+        require(debtorBalance[msg.sender] > 0, "No outstanding debt");
+
+        uint value = valueOf(_token, _amount);
+        require(
+            value <= debtorBalance[msg.sender],
+            "Repay amount exceeds debt"
+        );
+
+        // Update balances
+        debtorBalance[msg.sender] = debtorBalance[msg.sender].sub(value);
+        totalDebt = totalDebt.sub(value);
+        totalReserves = totalReserves.add(value);
+
+        emit ReservesUpdated(totalReserves);
+
+        // Transfer repayment token to the contract
+        IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
+
+        emit RepayDebt(msg.sender, _token, _amount, value);
+    }
+
+    function unlockCollateral() external {
+        require(debtorBalance[msg.sender] == 0, "Outstanding debt");
+        uint lockedCollateral = debtorCollateral[msg.sender];
+        require(lockedCollateral > 0, "No collateral locked");
+
+        // Unlock collateral
+        debtorCollateral[msg.sender] = 0;
+        IERC20(sOHM).transfer(msg.sender, lockedCollateral);
+
+        emit CollateralUnlocked(msg.sender, lockedCollateral);
     }
 
     /**
@@ -584,7 +633,6 @@ contract Treasury is Ownable {
         @notice send epoch reward to staking contract
      */
     function mintRewards(address _recipient, uint _amount) external {
-        
         require(isRewardManager[msg.sender], "Not approved");
         require(_amount <= excessReserves(), "Insufficient reserves");
 
@@ -597,12 +645,7 @@ contract Treasury is Ownable {
         @return uint
      */
     function excessReserves() public view returns (uint) {
-        
-        //!!!!!! todo
-        // return totalReserves;
-        //return totalReserves.sub(IERC20(OHM).totalSupply().sub(totalDebt));
         uint result = totalReserves.sub(supplied().sub(totalDebt));
-        
         return result;
     }
 

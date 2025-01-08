@@ -2,6 +2,7 @@
 pragma solidity 0.7.5;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/cryptography/ECDSA.sol";
 
 interface IERC20 {
     /**
@@ -166,6 +167,7 @@ library SafeMath {
 
 abstract contract ERC20 is IERC20 {
     using SafeMath for uint256;
+    using ECDSA for bytes32;
 
     // TODO comment actual hash value.
     bytes32 private constant ERC20TOKEN_ERC1820_INTERFACE_ID = keccak256("ERC20Token");
@@ -326,29 +328,17 @@ interface IERC2612Permit {
 
 abstract contract ERC20Permit is ERC20, IERC2612Permit {
     using Counters for Counters.Counter;
+    using ECDSA for bytes32;
 
     mapping(address => Counters.Counter) private _nonces;
 
     // keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
     bytes32 public constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
 
-    bytes32 public DOMAIN_SEPARATOR;
+    
 
     constructor() {
-        uint256 chainID;
-        assembly {
-            chainID := chainid()
-        }
-
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes(name())),
-                keccak256(bytes("1")), // Version
-                chainID,
-                address(this)
-            )
-        );
+        
     }
 
     function permit(address owner, address spender, uint256 amount, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
@@ -357,13 +347,29 @@ abstract contract ERC20Permit is ERC20, IERC2612Permit {
         override
     {
         require(block.timestamp <= deadline, "Permit: expired deadline");
+        uint256 chainID;
+        assembly {
+            chainID := chainid()
+        }
+        bytes32 DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes(name())),
+                keccak256(bytes("1")), // Version
+                chainID,
+                address(this)
+            )
+        );
 
-        bytes32 hashStruct =
-            keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, amount, _nonces[owner].current(), deadline));
+        uint c = _nonces[owner].current();
+        bytes32 hashStruct;
+        
+        hashStruct = keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, amount, c, deadline));
+        
 
         bytes32 _hash = keccak256(abi.encodePacked(uint16(0x1901), DOMAIN_SEPARATOR, hashStruct));
 
-        address signer = ecrecover(_hash, v, r, s);
+        address signer = _hash.recover(v, r, s);
         require(signer != address(0) && signer == owner, "ZeroSwapPermit: Invalid signature");
 
         _nonces[owner].increment();
@@ -427,7 +433,7 @@ contract WebKeyDAOERC20Token is ERC20Permit, VaultOwned {
         _burnFrom(account_, amount_);
     }
 
-    function _burnFrom(address account_, uint256 amount_) public virtual {
+    function _burnFrom(address account_, uint256 amount_) internal virtual {
         uint256 decreasedAllowance_ =
             allowance(account_, msg.sender).sub(amount_, "ERC20: burn amount exceeds allowance");
 
@@ -470,6 +476,10 @@ contract WKEYDAO is WebKeyDAOERC20Token {
     }
 
     constructor(address _feeReceiver, address _buyFeeReceiver, uint _buyFeeRatio) WebKeyDAOERC20Token() {
+        require(_feeReceiver != address(0), "Invalid fee receiver");
+        require(_buyFeeReceiver != address(0), "Invalid buy fee receiver");
+        require(_buyFeeRatio <= PRECISION, "Invalid buy fee ratio");
+
         feeReceiver = _feeReceiver;
         buyFeeReceiver = _buyFeeReceiver;
         buyFeeRatio = _buyFeeRatio ;
